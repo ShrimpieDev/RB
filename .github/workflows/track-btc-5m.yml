@@ -1,0 +1,51 @@
+name: Track BTC Reya vs Binance (5m)
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run comparison script
+        env:
+          REYA_SYMBOL: ${{ vars.REYA_SYMBOL || 'BTCRUSDPERP' }}
+          ROWS: ${{ vars.ROWS || '1440' }}
+          OUT_DIR: ${{ vars.OUT_DIR || 'data' }}
+          BINANCE_BASE_URL: ${{ vars.BINANCE_BASE_URL || 'https://fapi.binance.com' }}
+        run: python scripts/compare_prices_5m.py
+
+      - name: Commit and push changes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- data/btc_reya_vs_binance_1m.csv data/btc_reya_vs_binance_1m.json; then
+            echo "No data changes to commit."
+            exit 0
+          fi
+
+          git add data/btc_reya_vs_binance_1m.csv data/btc_reya_vs_binance_1m.json
+          git commit -m "chore: update 1m BTC comparison (5m runner)"
+          git push
