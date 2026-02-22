@@ -15,7 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 try:
     import requests  # type: ignore
-except ImportError:  # pragma: no cover
+except ImportError:
     requests = None
 
 from urllib.parse import urlencode
@@ -24,6 +24,7 @@ from urllib.request import Request, urlopen
 
 BINANCE_BASE_URL = os.getenv("BINANCE_BASE_URL", "https://fapi.binance.com")
 BINANCE_URL = f"{BINANCE_BASE_URL.rstrip('/')}/fapi/v1/markPriceKlines"
+
 REYA_URL_TEMPLATE = "https://api.reya.xyz/v2/candleHistory/{symbol}/{resolution}"
 BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "BTCUSDT")
 REYA_SYMBOL = os.getenv("REYA_SYMBOL", "BTCRUSDPERP")
@@ -36,14 +37,13 @@ BACKOFF_SECONDS = float(os.getenv("BACKOFF_SECONDS", "1.5"))
 
 
 class FetchError(RuntimeError):
-    """Raised when remote API data can't be parsed safely."""
+    pass
 
 
 @dataclass
 class CandlePoint:
     ts_ms: int
     close: Optional[float]
-
 
 
 def floor_to_minute(dt: datetime) -> datetime:
@@ -89,6 +89,7 @@ def request_json(url: str, params: Optional[Dict[str, Any]] = None) -> Any:
             with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 body = resp.read().decode("utf-8")
             return json.loads(body)
+
         except Exception as exc:
             last_error = exc
             if attempt == MAX_RETRIES:
@@ -115,12 +116,12 @@ def normalize_to_minute_ms(ts_ms: int) -> int:
 
 def parse_binance_payload(payload: Any) -> List[CandlePoint]:
     if not isinstance(payload, list):
-        raise FetchError("Unexpected Binance response: expected top-level list")
+        raise FetchError("Unexpected Binance response")
 
     points: List[CandlePoint] = []
-    for idx, item in enumerate(payload):
+    for item in payload:
         if not isinstance(item, list) or len(item) < 5:
-            raise FetchError(f"Unexpected Binance kline at index {idx}: {item}")
+            continue
         ts_ms = normalize_to_minute_ms(int(item[0]))
         close = to_float(item[4])
         points.append(CandlePoint(ts_ms=ts_ms, close=close))
@@ -141,47 +142,33 @@ def parse_reya_payload(payload: Any) -> List[CandlePoint]:
                 break
 
     if candles is None:
-        raise FetchError("Unexpected Reya response: expected list or object containing candle list")
+        raise FetchError("Unexpected Reya response")
 
     points: List[CandlePoint] = []
+
     for candle in candles:
         ts_ms: Optional[int] = None
         close: Optional[float] = None
 
-        if isinstance(candle, list):
-            if len(candle) < 5:
-                continue
+        if isinstance(candle, list) and len(candle) >= 5:
             ts_ms = int(candle[0])
             close = to_float(candle[4])
+
         elif isinstance(candle, dict):
-            ts_raw = None
-            for ts_key in ("timestamp", "time", "t", "openTime", "open_time"):
-                if ts_key in candle:
-                    ts_raw = candle[ts_key]
-                    break
+            ts_raw = next((candle.get(k) for k in ("timestamp", "time", "t", "openTime", "open_time") if k in candle), None)
+            if ts_raw is not None:
+                ts_int = int(float(ts_raw))
+                if ts_int < 10**12:
+                    ts_int *= 1000
+                ts_ms = ts_int
 
-            if ts_raw is None:
-                continue
+            close = next((to_float(candle.get(k)) for k in ("close", "c", "closePrice", "close_price") if k in candle), None)
 
-            ts_int = int(float(ts_raw))
-            if ts_int < 10**12:
-                ts_int *= 1000
-            ts_ms = ts_int
-
-            for close_key in ("close", "c", "closePrice", "close_price"):
-                if close_key in candle:
-                    close = to_float(candle[close_key])
-                    break
-        else:
-            continue
-
-        if ts_ms is None:
-            continue
-
-        points.append(CandlePoint(ts_ms=normalize_to_minute_ms(ts_ms), close=close))
+        if ts_ms is not None:
+            points.append(CandlePoint(ts_ms=normalize_to_minute_ms(ts_ms), close=close))
 
     if not points:
-        raise FetchError("Reya response parsed but no candle points were found")
+        raise FetchError("No Reya candle points found")
 
     return points
 
@@ -201,28 +188,15 @@ def fetch_binance(window_start_ms: int, now_ms: int) -> Dict[int, Optional[float
 
 def fetch_reya(window_start_ms: int, now_ms: int) -> Dict[int, Optional[float]]:
     url = REYA_URL_TEMPLATE.format(symbol=REYA_SYMBOL, resolution=RESOLUTION)
-    candidate_params = [
-        {"startTime": window_start_ms, "endTime": now_ms, "limit": max(ROWS + 60, 1500)},
-        {"from": window_start_ms, "to": now_ms, "limit": max(ROWS + 60, 1500)},
-        {"start": window_start_ms, "end": now_ms, "limit": max(ROWS + 60, 1500)},
-        {"limit": max(ROWS + 60, 1500)},
-        None,
-    ]
 
-    last_error: Optional[Exception] = None
-    for params in candidate_params:
-        try:
-            payload = request_json(url, params=params)
-            points = parse_reya_payload(payload)
-            filtered = {p.ts_ms: p.close for p in points if p.ts_ms >= window_start_ms}
-            if filtered:
-                return filtered
-            return {p.ts_ms: p.close for p in points}
-        except FetchError as exc:
-            last_error = exc
-            continue
+    payload = request_json(url, params={
+        "startTime": window_start_ms,
+        "endTime": now_ms,
+        "limit": max(ROWS + 60, 1500),
+    })
 
-    raise FetchError(f"Unable to parse Reya candles with known response formats: {last_error}")
+    points = parse_reya_payload(payload)
+    return {p.ts_ms: p.close for p in points}
 
 
 def write_csv(rows: List[Dict[str, Any]], path: Path) -> None:
@@ -237,8 +211,7 @@ def write_csv(rows: List[Dict[str, Any]], path: Path) -> None:
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
+        writer.writerows(rows)
 
 
 def write_json(rows: List[Dict[str, Any]], path: Path) -> None:
@@ -263,34 +236,32 @@ def main() -> int:
     reya_error: Optional[Exception] = None
 
     try:
-        binance_map = fetch_binance(window_start_ms=window_start_ms, now_ms=now_ms)
+        binance_map = fetch_binance(window_start_ms, now_ms)
     except FetchError as exc:
         binance_error = exc
-        print(f"WARN: Binance fetch failed; continuing with null Binance values. Reason: {exc}", file=sys.stderr)
+        print(f"WARN: Binance fetch failed — continuing with null Binance values. {exc}", file=sys.stderr)
 
     try:
-        reya_map = fetch_reya(window_start_ms=window_start_ms, now_ms=now_ms)
+        reya_map = fetch_reya(window_start_ms, now_ms)
     except FetchError as exc:
         reya_error = exc
-        print(f"WARN: Reya fetch failed; continuing with null Reya values. Reason: {exc}", file=sys.stderr)
+        print(f"WARN: Reya fetch failed — continuing with null Reya values. {exc}", file=sys.stderr)
 
-    if binance_error is not None and reya_error is not None:
+    if binance_error and reya_error:
         raise FetchError(f"Both sources failed. Binance: {binance_error}; Reya: {reya_error}")
 
     minute_timestamps = [window_start_ms + i * 60000 for i in range(ROWS)]
+
     rows = [
-        build_row(ts_ms=ts, binance_close=binance_map.get(ts), reya_close=reya_map.get(ts), updated_at=updated_at)
+        build_row(ts, binance_map.get(ts), reya_map.get(ts), updated_at)
         for ts in minute_timestamps
     ]
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    csv_path = OUT_DIR / "btc_reya_vs_binance_1m.csv"
-    json_path = OUT_DIR / "btc_reya_vs_binance_1m.json"
+    write_csv(rows, OUT_DIR / "btc_reya_vs_binance_1m.csv")
+    write_json(rows, OUT_DIR / "btc_reya_vs_binance_1m.json")
 
-    write_csv(rows, csv_path)
-    write_json(rows, json_path)
-
-    print(f"Wrote {len(rows)} rows to {csv_path} and {json_path}")
+    print(f"Wrote {len(rows)} rows successfully.")
     return 0
 
 
