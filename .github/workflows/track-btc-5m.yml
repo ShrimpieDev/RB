@@ -31,6 +31,7 @@ jobs:
           REYA_SYMBOL: ${{ vars.REYA_SYMBOL || 'BTCRUSDPERP' }}
           ROWS: ${{ vars.ROWS || '1440' }}
           OUT_DIR: ${{ vars.OUT_DIR || 'data' }}
+          BINANCE_BASE_URL: ${{ vars.BINANCE_BASE_URL || 'https://fapi.binance.com' }}
         run: python scripts/compare_prices_5m.py
 
       - name: Commit and push changes

@@ -47,36 +47,3 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python scripts/compare_prices_5m.py
-```
-
-## Configuration (environment variables)
-
-- `REYA_SYMBOL` (default: `BTCRUSDPERP`)
-- `ROWS` (default: `1440`)
-- `OUT_DIR` (default: `data`)
-
-Optional:
-
-- `BINANCE_SYMBOL` (default: `BTCUSDT`)
-- `RESOLUTION` (default: `1m`)
-- `REQUEST_TIMEOUT_SECONDS` (default: `20`)
-- `MAX_RETRIES` (default: `3`)
-- `BACKOFF_SECONDS` (default: `1.5`)
-
-### Examples
-
-```bash
-REYA_SYMBOL=BTCRUSDPERP ROWS=1440 OUT_DIR=data python scripts/compare_prices_5m.py
-```
-
-```bash
-REYA_SYMBOL=BTCRUSDPERP ROWS=720 python scripts/compare_prices_5m.py
-```
-
-## Notes on robustness
-
-- Uses UTC timestamps everywhere.
-- Normalizes candles to exact minute boundaries.
-- Keeps rows even when one source is missing (`null` close and diffs).
-- Includes retry logic with backoff for transient HTTP failures.
-- Provides clear parser errors if API response shape changes.
